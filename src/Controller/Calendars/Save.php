@@ -117,6 +117,7 @@ class Save extends JSONController
 
         foreach ($shares_diff->getMarkedForRemoval() as $removed_share) {
             $shares_repository->remove($removed_share);
+            $acl->revokeGrant($removed_share->getWith());
         }
 
         $this->client->applyACL($calendar, $acl);

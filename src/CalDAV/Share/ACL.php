@@ -40,6 +40,13 @@ class ACL
     private $grants;
 
     /**
+    * Revoked grants (principals whose access must be zeroed)
+    *
+    * @var array
+    */
+    private $revokes;
+
+    /**
     * Creates a new ACL
     *
     * @param \AgenDAV\CalDAV\Share\Permissions $permissions
@@ -48,6 +55,7 @@ class ACL
     {
         $this->permissions = $permissions;
         $this->grants = [];
+        $this->revokes = [];
     }
 
     /**
@@ -82,6 +90,27 @@ class ACL
         return $this->grants;
     }
 
+    /**
+    * Marks a grant as revoked: an empty-grant ACE will be sent for it
+    *
+    * @param string $principal Principal path
+    */
+    public function revokeGrant($principal)
+    {
+        unset($this->grants[$principal]);
+        $this->revokes[$principal] = true;
+    }
+
+    /**
+    * Gets the list of revoked principals
+    *
+    * @return array
+    */
+    public function getRevokedGrants()
+    {
+        return array_keys($this->revokes);
+    }
+    
     /**
     * Returns a list of privileges configured for the owner of the resource
     * affected by this ACL

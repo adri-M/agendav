@@ -168,6 +168,10 @@ class Generator
         foreach ($grants as $principal => $privileges) {
             $this->generateAceTag($writer, 'grant', $privileges, $principal);
         }
+
+        foreach ($acl->getRevokedGrants() as $principal) {
+            $this->generateEmptyGrantAceTag($writer, $principal);
+        }
         $writer->endElement();
 
         return $writer->outputMemory();
@@ -225,6 +229,23 @@ class Generator
         return $writer;
     }
 
+    /**
+    * Generates a <d:ace> element with an empty <d:grant/>, which zeroes
+    * the privileges of the given principal (DAViCal never deletes grants,
+    * but sets them to 0 when receiving an empty grant)
+    *
+    * @param \Sabre\Xml\Writer $writer
+    * @param string $principal Principal URL
+    * @return void
+    */
+    protected function generateEmptyGrantAceTag(Writer $writer, $principal)
+    {
+        $writer->startElement('{DAV:}ace');
+        $this->generatePrincipalForAce($writer, 'grant', $principal);
+        $writer->startElement('{DAV:}grant');
+        $writer->endElement(); // d:grant (empty => 0 privileges)
+        $writer->endElement(); // d:ace
+    }
 
     /**
     * Generates a <d:ace> element, which is used on ACLs
