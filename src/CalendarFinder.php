@@ -106,11 +106,38 @@ class CalendarFinder
             // Add share info to own calendars
             $this->addShares($calendars);
 
+            // Index already discovered calendars by normalized URL
+            $by_url = [];
+            foreach ($calendars as $calendar) {
+                $by_url[rtrim($calendar->getUrl(), '/') . '/'] = $calendar;
+            }
+
             // Also load calendars shared with current user
             $shared_calendars = $this->getCalendarSharedWith($this->current_principal);
 
-            $calendars = array_merge($calendars, $shared_calendars);
+            foreach ($shared_calendars as $shared) {
+                $key = rtrim($shared->getUrl(), '/') . '/';
+                if (isset($by_url[$key])) {
+                    // Deja auto-decouvert (ex. via calendar-proxy-read) :
+                    // on applique uniquement le displayname/color perso stockes
+                    // dans la table shares, jamais le flag writable
+                    // (le serveur est la source de verite pour les droits)
+                    $existing = $by_url[$key];
+                    $displayname = $shared->getProperty(Calendar::DISPLAYNAME);
+                    if ($displayname !== null && $displayname !== '') {
+                        $existing->setProperty(Calendar::DISPLAYNAME, $displayname);
+                    }
+                    $color = $shared->getProperty(Calendar::COLOR);
+                    if ($color !== null && $color !== '') {
+                        $existing->setProperty(Calendar::COLOR, $color);
+                    }
+                } else {
+                    $calendars[] = $shared;
+                    $by_url[$key] = $shared;
+                }
+            }
         }
+
         $subscribed_calendars = $this->getSubscribedCalendars($this->current_principal);
         $calendars = array_merge($calendars, $subscribed_calendars);
 
@@ -168,11 +195,25 @@ class CalendarFinder
                 continue;
             }
 
-            $calendar->setWritable($share->isWritable());
+            //$calendar->setWritable($share->isWritable());
+            //$owner_principal_url = $share->getOwner();
+            //$calendar->setOwner(new Principal($owner_principal_url));
+
+            //$custom_properties = $share->getProperties();
+
             $owner_principal_url = $share->getOwner();
             $calendar->setOwner(new Principal($owner_principal_url));
 
+            // Synchro : on recopie dans shares.rw les droits reels
+            // remontes par le serveur (current-user-privilege-set)
+            if ($calendar->isWritable() !== $share->isWritable()) {
+                $share->setWritePermission($calendar->isWritable());
+                $this->shares_repository->save($share);
+            }
+
             $custom_properties = $share->getProperties();
+
+
             $this->applySharedProperties($calendar, $custom_properties);
 
             $result[] = $calendar;
@@ -213,8 +254,143 @@ class CalendarFinder
     protected function addShares(array $calendars)
     {
         foreach ($calendars as $calendar) {
+            $this->syncSharesWithServer($calendar);
             $shares = $this->shares_repository->getSharesOnCalendar($calendar);
             $calendar->setShares($shares);
+        }
+    }
+
+/**
+     * Synchronizes the `shares` table with the real ACL grants stored on the
+     * CalDAV server, for a calendar owned by the current user.
+     *
+     * Why: agendav never reads the server ACL; the `shares` table is its only
+     * source for the "shares" tab, and on save it sends an ACL request that
+     * REPLACES the whole calendar ACL. Without syncing, a grant set by another
+     * application would be invisible in the UI... and wiped out on the next
+     * save. This function does the opposite on every calendar-list load:
+     *  - grant present on the server but missing from the table -> insert it
+     *  - row in the table but no grant on the server anymore -> delete it
+     *  - empty grant on the server (<grant/>) = no privilege left -> delete it
+     *  - rw flag mismatch -> resync it
+     */
+    protected function syncSharesWithServer(Calendar $calendar)
+    {
+        try {
+            // Only sync calendars OWNED by the current user: for a shared
+            // (proxied) calendar the ACL is not readable (no read-acl privilege)
+            // and the owner is not the current user.
+            if ($calendar->getOwner() === null
+                || $calendar->getOwner()->getUrl() !== $this->current_principal->getUrl()) {
+                return;
+            }
+
+            // PROPFIND Depth 0 on the {DAV:}acl property of the calendar
+            $body = '<?xml version="1.0" encoding="utf-8"?>'
+                . '<propfind xmlns="DAV:"><prop><acl/></prop></propfind>';
+            $response = $this->client->propfind($calendar->getUrl(), 0, $body);
+
+            // The owner always has read-acl: if the acl property is missing from
+            // the response, the ACL was emptied on the davical side (no grants
+            // left) => treat the list as empty, not as an error.
+            $acl = $response['{DAV:}acl'] ?? [];
+            if (!is_array($acl)) {
+                $acl = [];
+            }
+
+            // The sabre parser does not map {DAV:}acl to an object: it returns
+            // the raw XML tree, i.e. an array of elements
+            // ['name' => '{DAV:}ace', 'value' => [...], 'attributes' => ...]
+            $server_grants = []; // principal URL => list of privileges (Clark notation)
+            foreach ($acl as $ace) {
+                if (($ace['name'] ?? '') !== '{DAV:}ace' || !is_array($ace['value'] ?? null)) {
+                    continue;
+                }
+                $principal = null;
+                $privs = [];
+                foreach ($ace['value'] as $el) {
+                    if (($el['name'] ?? '') === '{DAV:}principal') {
+                        foreach ((array)($el['value'] ?? []) as $p) {
+                            if (($p['name'] ?? '') === '{DAV:}href') {
+                                $principal = $p['value']; // e.g. /caldav.php/ttest/
+                            } elseif (in_array($p['name'] ?? '', ['{DAV:}all', '{DAV:}authenticated', '{DAV:}unauthenticated'], true)) {
+                                $principal = $p['name']; // special principal
+                            }
+                            // {DAV:}property/{DAV:}owner = owner ACE: ignored
+                        }
+                    } elseif (($el['name'] ?? '') === '{DAV:}grant' && is_array($el['value'] ?? null)) {
+                        foreach ($el['value'] as $priv) {
+                            if (($priv['name'] ?? '') === '{DAV:}privilege') {
+                                foreach ((array)($priv['value'] ?? []) as $pv) {
+                                    $privs[] = $pv['name']; // e.g. {DAV:}read, {DAV:}write
+                                }
+                            }
+                        }
+                    }
+                }
+                if ($principal === null) {
+                    continue; // owner ACE
+                }
+                if (in_array($principal, ['{DAV:}all', '{DAV:}authenticated', '{DAV:}unauthenticated'], true)) {
+                    continue; // generic ACEs, not users
+                }
+                if ($principal === $this->current_principal->getUrl()) {
+                    continue; // self
+                }
+                $server_grants[$principal] = array_merge($server_grants[$principal] ?? [], $privs);
+            }
+
+            // An ACE present but with an EMPTY <grant/> means it has no privilege
+            // left (ACL emptied on the davical side): it is no longer an actual
+            // share. Drop it so the corresponding shares row gets deleted.
+            foreach ($server_grants as $p => $privs) {
+                if (empty($privs)) {
+                    unset($server_grants[$p]);
+                }
+            }
+
+            // A grant is read-write if it contains write, write-content or all
+            $is_rw = function (array $privs) {
+                return in_array('{DAV:}all', $privs, true)
+                    || in_array('{DAV:}write', $privs, true)
+                    || in_array('{DAV:}write-content', $privs, true);
+            };
+
+            $db_shares = $this->shares_repository->getSharesOnCalendar($calendar);
+            $db_by_with = [];
+            foreach ($db_shares as $share) {
+                $db_by_with[$share->getWith()] = $share;
+            }
+
+            // Cleanup: delete rows whose grant no longer exists on the server,
+            // and resync the rw flag if the rights changed.
+            foreach ($db_shares as $share) {
+                $with = $share->getWith();
+                if (!isset($server_grants[$with])) {
+                    $this->shares_repository->remove($share);
+                } elseif ($share->isWritable() !== $is_rw($server_grants[$with])) {
+                    $share->setWritePermission($is_rw($server_grants[$with]));
+                    $this->shares_repository->save($share);
+                }
+            }
+
+            // Insert: add to the table grants set by other applications.
+            foreach ($server_grants as $with => $privs) {
+                if (isset($db_by_with[$with])) {
+                    continue;
+                }
+                $share = new \AgenDAV\Data\Share();
+                $share->setOwner($this->current_principal->getUrl());
+                $share->setCalendar($calendar->getUrl());
+                $share->setWith($with);
+                $share->setWritePermission($is_rw($privs));
+                $this->shares_repository->save($share);
+            }
+        } catch (\Throwable $e) {
+            // A network or parsing problem must never break the calendar list:
+            // log it and leave the table as-is.
+            error_log('syncSharesWithServer: ' . get_class($e) . ' ' . $e->getMessage()
+                . ' @ ' . $e->getFile() . ':' . $e->getLine());
         }
     }
 }

@@ -83,6 +83,19 @@ class Save extends JSONController
 
         if ($input->getBoolean('is_owned') === false) {
             $share = $shares_repository->getSourceShare($calendar, $current_user_principal);
+            if ($share === null) {
+                // Pas encore de ligne dans la table shares : on la crée pour
+                // stocker le nom/couleur personnalisés de CET utilisateur uniquement
+                // (le calendrier appartient à quelqu'un d'autre, pas de PROPPATCH possible).
+                $share = new Share();
+                // Owner = principal déduit de l'URL du calendrier :
+                // /caldav.php/ttest/9d8e78e4-.../  →  /caldav.php/ttest/
+                $owner_url = preg_replace('#/[^/]+/?$#', '/', rtrim($url, '/') . '/');
+                $share->setOwner(rtrim($owner_url, '/') . '/');
+                $share->setCalendar($url);
+                $share->setWith($current_user_principal->getUrl());
+                $share->setWritePermission(false);
+            }
             $this->applySharedCalendarProperties($share, $input);
             $shares_repository->save($share);
             return $this->generateSuccess($response);
