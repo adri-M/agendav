@@ -374,6 +374,7 @@ return [
             $finder->setSharesRepository($c->get('shares.repository'));
         }
         $finder->setSubscriptionsRepository($c->get('subscriptions.repository'));
+	$finder->setDavicalDbConfig($c->get('davical.db') ?? []);
         return $finder;
     },
 

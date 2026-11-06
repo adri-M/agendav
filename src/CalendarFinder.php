@@ -50,6 +50,12 @@ class CalendarFinder
     /** @var \AgenDAV\Data\Principal */
     protected $current_principal;
 
+    /** @var array|null davical PostgreSQL config (read-only) */
+    protected $davical_db = null;
+
+    /** @var array per-request cache: calendar URL => (grantee URL => rw)|null */
+    protected $direct_grants_cache = [];
+
     /**
     * @param \Symfony\Component\HttpFoundation\Session\Session $session
     * @param \AgenDAV\CalDAV\Client $client
@@ -260,101 +266,140 @@ class CalendarFinder
         }
     }
 
-/**
-     * Synchronizes the `shares` table with the real ACL grants stored on the
-     * CalDAV server, for a calendar owned by the current user.
-     *
-     * Why: agendav never reads the server ACL; the `shares` table is its only
-     * source for the "shares" tab, and on save it sends an ACL request that
-     * REPLACES the whole calendar ACL. Without syncing, a grant set by another
-     * application would be invisible in the UI... and wiped out on the next
-     * save. This function does the opposite on every calendar-list load:
-     *  - grant present on the server but missing from the table -> insert it
-     *  - row in the table but no grant on the server anymore -> delete it
-     *  - empty grant on the server (<grant/>) = no privilege left -> delete it
-     *  - rw flag mismatch -> resync it
+
+
+    public function setDavicalDbConfig(array $config)
+    {
+        $this->davical_db = $config;
+    }
+
+    /**
+     * DIRECT grants of a collection, read from davical's own grants table
+     * (by_collection set = granted on the collection itself; principal-level
+     * grants have by_collection NULL and are inheritance, not shares).
+     * Returns grantee URL => rw bool, or null if DB access is unavailable.
      */
+    protected function getDirectGrantsFromDavicalDb($calendar_url)
+    {
+        if (empty($this->davical_db)) {
+            return null;
+        }
+        if (array_key_exists($calendar_url, $this->direct_grants_cache)) {
+            return $this->direct_grants_cache[$calendar_url];
+        }
+        $result = [];
+        try {
+            $port = $this->davical_db['port'] ?? 5432;
+            $dsn = sprintf('pgsql:host=%s;port=%d;dbname=%s',
+                $this->davical_db['host'], $port, $this->davical_db['dbname']);
+            $pdo = new \PDO($dsn, $this->davical_db['user'], $this->davical_db['password']);
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+
+            // davical stores dav_name WITHOUT the /caldav.php prefix
+            $dav_name = preg_replace('#^/caldav\.php#', '', $calendar_url);
+            $stmt = $pdo->prepare(
+                'SELECT COALESCE(u.username, p.displayname) AS grantee, g.privileges::int AS privs
+                 FROM grants g
+                 JOIN collection c ON c.collection_id = g.by_collection
+                 JOIN principal p ON p.principal_id = g.to_principal
+                 LEFT JOIN usr u ON u.user_no = p.user_no
+                 WHERE c.dav_name IN (:dav_name, :dav_name_full)'
+            );
+            $stmt->execute([':dav_name' => $dav_name, ':dav_name_full' => $calendar_url]);
+            foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
+                if ($row['grantee'] === null) {
+                    continue;
+                }
+                // davical privilege bits: write-properties=2, write-content=4
+                $rw = ((int)$row['privs'] & 6) !== 0;
+                $result['/caldav.php/' . $row['grantee'] . '/'] = $rw;
+            }
+        } catch (\Throwable $e) {
+            error_log('getDirectGrantsFromDavicalDb: ' . $e->getMessage());
+            $result = null; // fallback to acl parsing
+        }
+        $this->direct_grants_cache[$calendar_url] = $result;
+        return $result;
+    }
+
     protected function syncSharesWithServer(Calendar $calendar)
     {
         try {
-            // Only sync calendars OWNED by the current user: for a shared
-            // (proxied) calendar the ACL is not readable (no read-acl privilege)
-            // and the owner is not the current user.
+            // Only sync calendars OWNED by the current user.
             if ($calendar->getOwner() === null
                 || $calendar->getOwner()->getUrl() !== $this->current_principal->getUrl()) {
                 return;
             }
 
-            // PROPFIND Depth 0 on the {DAV:}acl property of the calendar
-            $body = '<?xml version="1.0" encoding="utf-8"?>'
-                . '<propfind xmlns="DAV:"><prop><acl/></prop></propfind>';
-            $response = $this->client->propfind($calendar->getUrl(), 0, $body);
-
-            // The owner always has read-acl: if the acl property is missing from
-            // the response, the ACL was emptied on the davical side (no grants
-            // left) => treat the list as empty, not as an error.
-            $acl = $response['{DAV:}acl'] ?? [];
-            if (!is_array($acl)) {
-                $acl = [];
-            }
-
-            // The sabre parser does not map {DAV:}acl to an object: it returns
-            // the raw XML tree, i.e. an array of elements
-            // ['name' => '{DAV:}ace', 'value' => [...], 'attributes' => ...]
-            $server_grants = []; // principal URL => list of privileges (Clark notation)
-            foreach ($acl as $ace) {
-                if (($ace['name'] ?? '') !== '{DAV:}ace' || !is_array($ace['value'] ?? null)) {
-                    continue;
-                }
-                $principal = null;
-                $privs = [];
-                foreach ($ace['value'] as $el) {
-                    if (($el['name'] ?? '') === '{DAV:}principal') {
-                        foreach ((array)($el['value'] ?? []) as $p) {
-                            if (($p['name'] ?? '') === '{DAV:}href') {
-                                $principal = $p['value']; // e.g. /caldav.php/ttest/
-                            } elseif (in_array($p['name'] ?? '', ['{DAV:}all', '{DAV:}authenticated', '{DAV:}unauthenticated'], true)) {
-                                $principal = $p['name']; // special principal
-                            }
-                            // {DAV:}property/{DAV:}owner = owner ACE: ignored
-                        }
-                    } elseif (($el['name'] ?? '') === '{DAV:}grant' && is_array($el['value'] ?? null)) {
-                        foreach ($el['value'] as $priv) {
-                            if (($priv['name'] ?? '') === '{DAV:}privilege') {
-                                foreach ((array)($priv['value'] ?? []) as $pv) {
-                                    $privs[] = $pv['name']; // e.g. {DAV:}read, {DAV:}write
-                                }
-                            }
-                        }
-                    }
-                }
-                if ($principal === null) {
-                    continue; // owner ACE
-                }
-                if (in_array($principal, ['{DAV:}all', '{DAV:}authenticated', '{DAV:}unauthenticated'], true)) {
-                    continue; // generic ACEs, not users
-                }
-                if ($principal === $this->current_principal->getUrl()) {
-                    continue; // self
-                }
-                $server_grants[$principal] = array_merge($server_grants[$principal] ?? [], $privs);
-            }
-
-            // An ACE present but with an EMPTY <grant/> means it has no privilege
-            // left (ACL emptied on the davical side): it is no longer an actual
-            // share. Drop it so the corresponding shares row gets deleted.
-            foreach ($server_grants as $p => $privs) {
-                if (empty($privs)) {
-                    unset($server_grants[$p]);
-                }
-            }
-
-            // A grant is read-write if it contains write, write-content or all
             $is_rw = function (array $privs) {
                 return in_array('{DAV:}all', $privs, true)
                     || in_array('{DAV:}write', $privs, true)
                     || in_array('{DAV:}write-content', $privs, true);
             };
+
+            // Preferred source: DIRECT grants from davical's grants table
+            $direct = $this->getDirectGrantsFromDavicalDb($calendar->getUrl());
+
+            if ($direct !== null) {
+                $server_grants = [];
+                foreach ($direct as $grantee_url => $rw) {
+                    if ($grantee_url === $this->current_principal->getUrl()) {
+                        continue; // self
+                    }
+                    $server_grants[$grantee_url] = $rw ? ['{DAV:}write'] : ['{DAV:}read'];
+                }
+            } else {
+                // Fallback (no DB access): parse the acl property
+                $body = '<?xml version="1.0" encoding="utf-8"?>'
+                    . '<propfind xmlns="DAV:"><prop><acl/></prop></propfind>';
+                $response = $this->client->propfind($calendar->getUrl(), 0, $body);
+                $acl = $response['{DAV:}acl'] ?? [];
+                if (!is_array($acl)) {
+                    $acl = [];
+                }
+                $server_grants = [];
+                foreach ($acl as $ace) {
+                    if (($ace['name'] ?? '') !== '{DAV:}ace' || !is_array($ace['value'] ?? null)) {
+                        continue;
+                    }
+                    $principal = null;
+                    $privs = [];
+                    foreach ($ace['value'] as $el) {
+                        if (($el['name'] ?? '') === '{DAV:}principal') {
+                            foreach ((array)($el['value'] ?? []) as $p) {
+                                if (($p['name'] ?? '') === '{DAV:}href') {
+                                    $principal = $p['value'];
+                                } elseif (in_array($p['name'] ?? '', ['{DAV:}all', '{DAV:}authenticated', '{DAV:}unauthenticated'], true)) {
+                                    $principal = $p['name'];
+                                }
+                            }
+                        } elseif (($el['name'] ?? '') === '{DAV:}grant' && is_array($el['value'] ?? null)) {
+                            foreach ($el['value'] as $priv) {
+                                if (($priv['name'] ?? '') === '{DAV:}privilege') {
+                                    foreach ((array)($priv['value'] ?? []) as $pv) {
+                                        $privs[] = $pv['name'];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if ($principal === null) {
+                        continue;
+                    }
+                    if (in_array($principal, ['{DAV:}all', '{DAV:}authenticated', '{DAV:}unauthenticated'], true)) {
+                        continue;
+                    }
+                    if ($principal === $this->current_principal->getUrl()) {
+                        continue;
+                    }
+                    $server_grants[$principal] = array_merge($server_grants[$principal] ?? [], $privs);
+                }
+                foreach ($server_grants as $p => $privs) {
+                    if (empty($privs)) {
+                        unset($server_grants[$p]);
+                    }
+                }
+            }
 
             $db_shares = $this->shares_repository->getSharesOnCalendar($calendar);
             $db_by_with = [];
@@ -362,8 +407,7 @@ class CalendarFinder
                 $db_by_with[$share->getWith()] = $share;
             }
 
-            // Cleanup: delete rows whose grant no longer exists on the server,
-            // and resync the rw flag if the rights changed.
+            // Delete rows with no direct grant on the collection; resync rw
             foreach ($db_shares as $share) {
                 $with = $share->getWith();
                 if (!isset($server_grants[$with])) {
@@ -374,7 +418,7 @@ class CalendarFinder
                 }
             }
 
-            // Insert: add to the table grants set by other applications.
+            // Insert direct grants missing from the table
             foreach ($server_grants as $with => $privs) {
                 if (isset($db_by_with[$with])) {
                     continue;
@@ -387,10 +431,10 @@ class CalendarFinder
                 $this->shares_repository->save($share);
             }
         } catch (\Throwable $e) {
-            // A network or parsing problem must never break the calendar list:
-            // log it and leave the table as-is.
             error_log('syncSharesWithServer: ' . get_class($e) . ' ' . $e->getMessage()
                 . ' @ ' . $e->getFile() . ':' . $e->getLine());
         }
     }
+
+
 }
