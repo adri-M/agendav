@@ -2093,17 +2093,20 @@ var set_calendar_visibility = function set_calendar_visibility(calendar_obj, hid
     return;
   }
 
+  var request_data = {
+    calendar: data.calendar,
+    displayname: data.displayname,
+    calendar_color: data.color,
+    is_owned: false,
+    is_subscribed: false,
+    is_hidden: hidden
+  };
+  request_data[csrf_id] = get_csrf_token();
+
   send_form({
     form_object: {
       url: AgenDAVConf.base_app_url + 'calendars/save',
-      data: {
-        calendar: data.calendar,
-        displayname: data.displayname,
-        calendar_color: data.color,
-        is_owned: false,
-        is_subscribed: false,
-        is_hidden: hidden
-      }
+      data: request_data
     },
     exception: function(message) {
       set_calendar_visibility(calendar_obj, !hidden, false);
