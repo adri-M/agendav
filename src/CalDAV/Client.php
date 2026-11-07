@@ -183,7 +183,7 @@ class Client
                 $calendars = $this->getCalendars($homeSet);
                 foreach ($calendars as $calendar) {
                     $calendar->setOwner(new Principal($proxyUrl));
-                    $calendar->setWritable($isWritable);
+		    $calendar->setWritable($calendar->isWritable() || $isWritable);
                 }
 
                 $proxiedCalendars = array_merge($proxiedCalendars, $calendars);
