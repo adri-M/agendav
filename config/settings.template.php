@@ -29,6 +29,18 @@ return [
         'charset'  => 'utf8mb4',
     ],
 
+
+    // Giving access to davical database allow automatic synchronisation for sharing area in agendav.
+    // This is a davical specific configuration: To display sharings, shares must already be present in agendav share table.
+    // We can't use propfind only because of specific case: Principal have read, Collection have no access and default is disable collection --> Propfind will display the access to collection (it should not)
+    'davical.db' => [
+        'host' => 'localhost',
+        'port' => 5432,
+        'dbname' => 'davical',
+        'user' => 'agendav_ro',
+        'password' => 'change-me',
+     ],
+
     // PostgreSQL example:
     // 'db.options' => [
     //     'driver'   => 'pdo_pgsql',
