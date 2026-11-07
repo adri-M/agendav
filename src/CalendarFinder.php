@@ -25,6 +25,7 @@ use AgenDAV\Repositories\SharesRepository;
 use AgenDAV\CalDAV\Client;
 use AgenDAV\CalDAV\Resource\Calendar;
 use AgenDAV\Data\Principal;
+use AgenDAV\Data\Share;
 use Symfony\Component\HttpFoundation\Session\Session;
 
 /**
@@ -137,6 +138,7 @@ class CalendarFinder
                     if ($color !== null && $color !== '') {
                         $existing->setProperty(Calendar::COLOR, $color);
                     }
+                    $existing->setHidden($shared->isHidden());
                 } else {
                     $calendars[] = $shared;
                     $by_url[$key] = $shared;
@@ -195,6 +197,7 @@ class CalendarFinder
             try {
                 $calendar = $this->client->getCalendarByUrl($calendar_url);
                 $share->applyCustomPropertiesTo($calendar);
+                $calendar->setHidden((bool) $share->getProperty(Share::HIDDEN));
             } catch (\Exception $e) {
                 // ACL was probably removed or modified. Ignore this calendar
                 // TODO: some logging

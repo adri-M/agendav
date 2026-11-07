@@ -147,6 +147,9 @@ class Save extends JSONController
     {
         $share->setProperty(Calendar::DISPLAYNAME, $input->get('displayname'));
         $share->setProperty(Calendar::COLOR, $input->get('calendar_color'));
+        if ($input->has('is_hidden')) {
+            $share->setProperty(Share::HIDDEN, $input->getBoolean('is_hidden'));
+        }
     }
 
     /**

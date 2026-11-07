@@ -58,6 +58,13 @@ class Calendar
     protected $subscribed;
 
     /**
+    * Whether this calendar is hidden in the current user's view
+    *
+    * @var boolean
+    */
+    protected $hidden;
+
+    /**
     * Owner of this calendar.
     *
     * Required on shared calendars
@@ -105,6 +112,7 @@ class Calendar
 
         $this->writable = true;
         $this->subscribed = false;
+        $this->hidden = false;
         $this->shares = [];
     }
 
@@ -216,6 +224,16 @@ class Calendar
     public function setSubscribed($subscribed)
     {
         $this->subscribed = $subscribed;
+    }
+
+    public function isHidden()
+    {
+        return $this->hidden;
+    }
+
+    public function setHidden($hidden)
+    {
+        $this->hidden = (bool) $hidden;
     }
 
     /*

@@ -299,7 +299,7 @@ $(document).ready(function() {
     var shared_cals = $('#shared_calendar_list').find('ul').children();
     if ($(this).hasClass('hide_all')) {
       $.map(shared_cals, function(e, i) {
-        hide_calendar($(e));
+        set_calendar_visibility($(e), true, true);
       });
       $(this)
         .removeClass('hide_all')
@@ -309,7 +309,7 @@ $(document).ready(function() {
           .addClass('fa-eye');
     } else {
       $.map(shared_cals, function(e, i) {
-        show_calendar($(e));
+        set_calendar_visibility($(e), false, true);
       });
       $(this)
         .removeClass('show_all')
@@ -1244,7 +1244,11 @@ var update_calendar_list = function update_calendar_list(maskbody) {
         li.addClass('default_calendar');
       }
 
-      if (was_hidden[calendar.calendar]) {
+      var is_hidden = calendar.is_shared === true
+        ? calendar.is_hidden === true
+        : was_hidden[calendar.calendar];
+
+      if (is_hidden) {
         li.addClass('hidden_calendar');
       } else {
         collected_event_sources.push($(li).data().eventsource);
@@ -1308,9 +1312,9 @@ var update_calendar_list = function update_calendar_list(maskbody) {
     }
 
     // Add event sources
-    while (count--) {
+    while (collected_event_sources.length > 0) {
       $('#calendar_view').fullCalendar('addEventSource',
-        collected_event_sources[count]);
+        collected_event_sources.pop());
     }
 
     $('#shortcut_add_event').removeAttr('disabled');
@@ -2070,11 +2074,46 @@ var hide_calendar = function hide_calendar(calendar_obj) {
 
 // Toggles calendar visibility
 var toggle_calendar = function toggle_calendar(calendar_obj) {
-  if (calendar_obj.hasClass('hidden_calendar')) {
-    show_calendar(calendar_obj);
-  } else {
+  set_calendar_visibility(
+    calendar_obj,
+    !calendar_obj.hasClass('hidden_calendar'),
+    true
+  );
+};
+
+var set_calendar_visibility = function set_calendar_visibility(calendar_obj, hidden, persist) {
+  if (hidden) {
     hide_calendar(calendar_obj);
+  } else {
+    show_calendar(calendar_obj);
   }
+
+  var data = calendar_obj.data();
+  if (!persist || data.is_shared !== true) {
+    return;
+  }
+
+  send_form({
+    form_object: {
+      url: AgenDAVConf.base_app_url + 'calendars/save',
+      data: {
+        calendar: data.calendar,
+        displayname: data.displayname,
+        calendar_color: data.color,
+        is_owned: false,
+        is_subscribed: false,
+        is_hidden: hidden
+      }
+    },
+    exception: function(message) {
+      set_calendar_visibility(calendar_obj, !hidden, false);
+      show_error(t('messages', 'error_invalidinput'), message);
+    },
+    error: function(message) {
+      set_calendar_visibility(calendar_obj, !hidden, false);
+      show_error(t('messages', 'error_interfacefailure'), message);
+    }
+  });
 };
 
 // Show warning - Grays out a calendar and shows a warning icon with a given tooltip message

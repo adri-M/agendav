@@ -48,6 +48,7 @@ class CalendarTransformerTest extends TestCase
                 'owner' => '/owner/principal',
                 'is_owned' => true,
                 'is_subscribed' => false,
+                'is_hidden' => false,
                 'writable' => true,
                 'shares' => [],
             ]
@@ -76,10 +77,23 @@ class CalendarTransformerTest extends TestCase
                 'owner' => '/owner/principal',
                 'is_owned' => false,
                 'is_subscribed' => false,
+                'is_hidden' => false,
                 'writable' => true,
                 'shares' => [],
             ]
         );
 
+    }
+
+    public function testTransformSharedCalendarHidden()
+    {
+        $owner = new Principal('/owner/principal');
+        $this->calendar->setOwner($owner);
+        $this->calendar->setHidden(true);
+
+        $transformer = new CalendarTransformer('/other/principal');
+        $result = $transformer->transform($this->calendar);
+
+        $this->assertTrue($result['is_hidden']);
     }
 }

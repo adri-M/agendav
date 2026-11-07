@@ -39,6 +39,8 @@ use Doctrine\ORM\Mapping\PostLoad;
 #[Table(name: 'shares')]
 class Share
 {
+    const HIDDEN = 'hidden';
+
     #[Id]
     #[Column(type: 'integer')]
     #[GeneratedValue]
