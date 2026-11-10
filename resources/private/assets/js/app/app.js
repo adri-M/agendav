@@ -1714,11 +1714,17 @@ var event_render_callback = function event_render_callback(event, element) {
 
   // Hover tooltip with full time and title
   var fmt = AgenDAVDateAndTime.momentFormat[AgenDAVUserPrefs.time_format];
-  var tooltip = event.allDay
-    ? event.title
-    : event.start.format(fmt) + ' - ' + event.end.format(fmt) + ' ' + event.title;
+  var tooltip;
+  if (event.allDay) {
+      tooltip = event.title;
+  } else if (event.start && event.end) {
+      tooltip = event.start.format(fmt) + ' - ' + event.end.format(fmt) + ' ' + event.title;
+  } else if (event.start) {
+      tooltip = event.start.format(fmt) + ' ' + event.title;
+  } else {
+      tooltip = event.title;
+  }
   element.attr('title', tooltip);
-
 };
 
 /**

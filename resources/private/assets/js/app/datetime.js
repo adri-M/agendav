@@ -99,9 +99,12 @@ AgenDAVDateAndTime.formatEventDates = function formatEventDates(event_data) {
     // After dropping/resizing an event, the 'end' property gets a null
     // value, usually on all day events if the event duration is just 1 day
     if (event_data.end === null) {
-        var unit = (event_data.allDay ? 'days' : 'hours');
-        end = moment(event_data.start);
-        end.add(1, unit);
+        if (event_data.allDay === true) {
+            end = moment(event_data.start);
+            end.add(1, 'days');
+        } else {
+            return start.format('LL') + " " + this.extractTime(start);
+        }
     }
 
     if (event_data.allDay === true) {
@@ -124,7 +127,6 @@ AgenDAVDateAndTime.formatEventDates = function formatEventDates(event_data) {
 
     return result;
 };
-
 
 /**
  * Receives a datepicker input and an optional timepicker input, and returns
